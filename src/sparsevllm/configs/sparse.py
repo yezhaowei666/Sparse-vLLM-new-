@@ -22,11 +22,26 @@ from sparsevllm.utils.log import log_once, logger
 
 def normalize_sparse_method_name(config) -> None:
     config.sparse_method = normalize_sparse_method(config.sparse_method)
+    lease = config.sparse_method == "leasesparse"
+    if lease:
+        config.enable_leasesparse_offload = _coerce_bool_config(
+            "enable_leasesparse_offload", config.enable_leasesparse_offload
+        )
+    if config.recent_keep_tokens is None:
+        config.recent_keep_tokens = 64 if lease or config.sparse_method == "attnpredict" else 512
+    if config.decode_keep_tokens is None:
+        config.decode_keep_tokens = 3968 if lease or config.sparse_method == "attnpredict" else 4096
     config.enable_omnikv_offload = _coerce_bool_config(
         "enable_omnikv_offload", config.enable_omnikv_offload
     )
     if config.enable_omnikv_offload and config.sparse_method != "omnikv":
         raise ValueError("enable_omnikv_offload requires sparse_method='omnikv'.")
+    reuse = config.omnikv_reuse_steps
+    if isinstance(reuse, bool) or not isinstance(reuse, int) or reuse < 1:
+        raise ValueError("omnikv_reuse_steps must be a positive integer.")
+    if reuse > 1 and (not config.enable_omnikv_offload or config.enable_prefix_caching
+                     or config.tensor_parallel_size != 1 or config.decode_keep_tokens <= 0):
+        raise ValueError("OmniKV reuse requires offload, TP1, positive decode budget and no prefix cache.")
     cache_tokens = config.omnikv_offload_cache_tokens
     if cache_tokens is not None and (
         isinstance(cache_tokens, bool) or not isinstance(cache_tokens, int) or cache_tokens < 0
@@ -436,6 +451,45 @@ def finalize_sparse_layout(config) -> None:
             "full_attention_layers must contain KV/full-attention layer indices for "
             f"{config.sparse_method}; non-KV layers={unknown_full_layers}."
         )
+    if config.sparse_method == "attnpredict":
+        from pathlib import Path
+        if (config.hf_config.model_type not in ("qwen2", "qwen3") or config.world_size != 1
+                or config.enable_prefix_caching or config.prefill_sparse_method
+                or str(config.hf_config.dtype) not in ("bfloat16", "torch.bfloat16")):
+            raise ValueError("AttentionPredictor requires dense Qwen BF16, single GPU, no prefix cache or sparse prefill.")
+        if (config.decode_keep_tokens,config.sink_keep_tokens,config.recent_keep_tokens)!=(3968,64,64):
+            raise ValueError("AttentionPredictor uses total budget4096, sink64 and recent64.")
+        if config.full_attention_layers and config.full_attention_layers != [0,1]:
+            raise ValueError("AttentionPredictor keeps exactly layers0 and1 dense.")
+        if not Path(config.attnpredict_model_path).is_file():
+            raise FileNotFoundError(config.attnpredict_model_path)
+        config.full_attention_layers=[0,1]
+        config.obs_layer_ids=list(range(2,config.hf_config.num_hidden_layers))
+        return
+    if config.sparse_method == "leasesparse":
+        if (config.hf_config.model_type != "qwen2" or config.hf_config.num_hidden_layers != 28
+                or config.hf_config.num_attention_heads != 28 or config.hf_config.num_key_value_heads != 4
+                or config.world_size != 1 or config.enable_prefix_caching or config.prefill_sparse_method
+                or config.hf_config.dtype != "bfloat16" and str(config.hf_config.dtype) != "torch.bfloat16"):
+            raise ValueError("LeaseSparse requires Qwen2.5-7B BF16, single GPU, no prefix cache or sparse prefill.")
+        if (config.leasesparse_alpha != 0.2 or config.leasesparse_reuse_steps not in (1,4,16)
+                or config.leasesparse_max_stale_steps != config.leasesparse_reuse_steps or config.leasesparse_block_size != 16
+                or tuple(config.leasesparse_sources) not in ((0,1,2,3,7,10,12,14,16,18,19,23), tuple(range(28)))
+                or (config.decode_keep_tokens, config.sink_keep_tokens, config.recent_keep_tokens) != (3968,64,64)):
+            raise ValueError("LeaseSparse v1 supports the EMA, 1/4/16-step leases with matching max_stale_steps, 12/28 groups, and 4096 tokens.")
+        if config.full_attention_layers:
+            raise ValueError("LeaseSparse has no full-attention decode layers.")
+        if config.leasesparse_predictor_path:
+            from pathlib import Path
+            from sparsevllm.models.rope import resolve_rope_scaling
+            if (config.leasesparse_reuse_steps != 4 or tuple(config.leasesparse_sources) != tuple(range(28))
+                    or resolve_rope_scaling(config.hf_config,model_name="Qwen2") is not None
+                    or config.hf_config.hidden_size != 3584):
+                raise ValueError("LeaseSparse predictor requires 4-step leases, 28 independent layers and unscaled RoPE.")
+            if not Path(config.leasesparse_predictor_path).is_file():
+                raise FileNotFoundError(config.leasesparse_predictor_path)
+        config.obs_layer_ids = list(config.leasesparse_sources)
+        return
     config.obs_layer_ids = []
     for layer in config.full_attention_layers:
         layer = int(layer)

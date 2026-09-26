@@ -93,7 +93,8 @@ class RuntimeDecodeGraphState:
                 device=inputs.input_ids.device,
             )
 
-    def prepare_in_graph(self) -> None:
+    def prepare_in_graph(self, *, warmup: bool = False) -> None:
+        self.cache.capture_warmup = warmup
         self.owner.cache_manager.prepare_decode_graph_in(self.cache)
         for participant, state in self.operator_states:
             participant.prepare_decode_graph_in(state)

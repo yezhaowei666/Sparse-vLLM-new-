@@ -23,8 +23,11 @@ from ...storage import HeterogeneousExplicitKVStorage
 
 
 class OmniKVCacheManager(StandardCacheManager):
+    independent_layer_cache = False
+    extra_selection_tokens = 0
+
     def __init__(self, config, parallel_context, *, allocation_budget_bytes=None):
-        self.offload_enabled = bool(config.enable_omnikv_offload)
+        self.offload_enabled = self.offload_setting(config)
         self._prefetched = set()
         self._pending_prefetch = deque()
         self._current_writes = {}
@@ -34,6 +37,31 @@ class OmniKVCacheManager(StandardCacheManager):
         super().__init__(
             config, parallel_context, allocation_budget_bytes=allocation_budget_bytes
         )
+
+    def initialize_selection_reuse(self):
+        G, R, K = len(self.config.obs_layer_ids), self.max_buffer_rows, self.config.decode_keep_tokens
+        self.reuse_groups = {layer: g for g, layer in enumerate(self.config.obs_layer_ids)}
+        self.reuse_indices = torch.full((G,R,K), -1, dtype=torch.int32, device=self.device)
+        self.reuse_starts = torch.full((G,R), -1, dtype=torch.int32, device=self.device)
+        self.reuse_counts = torch.zeros((G,2), dtype=torch.int32, device=self.device)
+
+    def prepare_selection_reuse(self, layer, rows, lengths):
+        starts = self.reuse_starts[self.reuse_groups[layer]].index_select(0, rows)
+        short_limit = self.config.sink_keep_tokens + self.config.recent_keep_tokens + self.config.decode_keep_tokens
+        self.reuse_refresh = ((starts < 0) | (lengths-starts >= self.config.omnikv_reuse_steps)
+                              | (starts < short_limit)) & (self.layer_batch_state.slot_mapping >= 0)
+        self.reuse_score_lengths = torch.where(self.reuse_refresh, lengths, 0)
+
+    def commit_selection_reuse(self, layer, rows, lengths, indices):
+        from sparsevllm.kernels.triton.omnikv_fused import commit_omnikv_reuse
+        g = self.reuse_groups[layer]
+        commit_omnikv_reuse(self.reuse_indices[g], self.reuse_starts[g], self.reuse_counts[g],
+                            rows, lengths, self.layer_batch_state.slot_mapping, self.reuse_refresh, indices)
+        return self.reuse_indices[g].index_select(0, rows)[:, :indices.shape[1]].contiguous()
+
+    @staticmethod
+    def offload_setting(config):
+        return bool(config.enable_omnikv_offload)
 
     def allocate_kv_cache(self):
         if not self.offload_enabled:
@@ -54,6 +82,8 @@ class OmniKVCacheManager(StandardCacheManager):
             self.num_kv_layers,
             self.max_buffer_rows,
             per_layer,
+            independent_layers=self.independent_layer_cache,
+            extra_tokens=self.extra_selection_tokens,
         )
         full = plan.full_layers
         sparse = self.num_kv_layers - len(full)
@@ -239,6 +269,9 @@ class OmniKVCacheManager(StandardCacheManager):
                 omnikv_gpu_only_kv_bytes=baseline,
                 observed_savings=1 - gpu_bytes / baseline,
             )
+        if self.config.omnikv_reuse_steps > 1:
+            result["omnikv_reuse_counts"] = dict(zip(
+                self.config.obs_layer_ids, self.reuse_counts.cpu().tolist()))
         return result
 
     def begin_selection_step(self):
@@ -250,6 +283,8 @@ class OmniKVCacheManager(StandardCacheManager):
             self.lru.planned.clear()
 
     def free_seq(self, seq_id):
+        if self.config.omnikv_reuse_steps > 1:
+            self.reuse_starts[:, self.seq_id_to_row[seq_id]] = -1
         if self.lru is not None:
             self.lru.invalidate(self.seq_id_to_row[seq_id])
         return super().free_seq(seq_id)
@@ -487,6 +522,8 @@ class OmniKVCacheManager(StandardCacheManager):
             result.extend((self.selected_slots, self.selected_rows))
             if self.lru is not None:
                 result.extend(self.lru.tensors())
+        if self.config.omnikv_reuse_steps > 1:
+            result.extend((self.reuse_indices, self.reuse_starts, self.reuse_counts))
         return result
 
     def on_forward_end(self, seqs, is_prefill):

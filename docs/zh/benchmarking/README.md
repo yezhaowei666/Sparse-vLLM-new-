@@ -113,6 +113,10 @@ python benchmark/long_bench/pred.py \
 
 完整 LongBench run 省略 `--task`。切换到 DeltaKV 时，设置 `sparse_method="deltakv"` 并提供匹配的 `deltakv_checkpoint_path`。旧 manifest 中的 legacy `deltakv-less-memory*` method ID 会规范到同一个 runtime。
 
+首次运行指定固定的 `--output_root <RUN_DIR>`；中断后保留该目录，使用相同命令追加 `--resume`。
+恢复按完整样本进行：跳过已成功样本，重跑失败和未完成样本，进度条从已完成数量继续；不会恢复单条生成中的KV状态。
+配置、数据、预测器权重或推理代码改变时会拒绝续跑，避免混合结果。全部样本已完成时直接重新汇总评分，不加载模型。
+
 对于线性 chain prefix-cache trace，在
 `scripts/benchmarks/bench_prefix_cache.py` 中选择 `chain_snapkv`、
 `chain_h2o`、`chain_pyramidkv`、`chain_rkv` 或 `chain_skipkv`。Chain case 要求使用

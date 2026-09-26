@@ -546,6 +546,14 @@ class FlashInferPagedDecodeAttentionProvider(DecodeAttentionProvider):
             return common
         if not spec.causal:
             return SupportResult.unsupported("requires causal attention")
+        # Our wrapper uses FlashInfer's CUDA-core decode path (the default
+        # use_tensor_cores=False). Its DISPATCH_GQA_GROUP_SIZE supports only
+        # these ratios; reject incompatible shapes before planning/capture.
+        group_size = spec.num_query_heads // spec.num_kv_heads
+        if group_size not in (1, 2, 3, 4, 6, 8):
+            return SupportResult.unsupported(
+                f"FlashInfer CUDA-core decode does not support GQA group_size={group_size}"
+            )
         supported, reason = flashinfer_paged_decode_support()
         return SupportResult.yes(reason) if supported else SupportResult.unsupported(reason)
 

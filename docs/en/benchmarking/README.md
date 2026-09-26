@@ -131,6 +131,13 @@ For a full LongBench run, omit `--task`. To switch to DeltaKV, set
 `deltakv_checkpoint_path`. Legacy `deltakv-less-memory*` method ids in old
 manifests normalize to the same runtime.
 
+Set a stable `--output_root <RUN_DIR>` on the first run. Keep that directory after
+an interruption and repeat the same command with `--resume`. Completed samples
+are skipped; failed or unfinished samples are retried, with progress starting
+at the completed count. Resumption does not restore an in-flight request's KV
+state. Changed configuration, data, predictor weights, or inference code rejects
+resumption. When every sample is complete, scoring runs without loading the model.
+
 For linear chain prefix-cache traces, select `chain_snapkv`, `chain_h2o`,
 `chain_pyramidkv`, `chain_rkv`, or `chain_skipkv` in
 `scripts/benchmarks/bench_prefix_cache.py`. Chain cases require

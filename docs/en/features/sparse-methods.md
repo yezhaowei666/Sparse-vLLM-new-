@@ -24,6 +24,43 @@ Sparse-vLLM uses `sparse_method` unchanged in public commands, `LLM(...)`, the
 runtime config, and internal consumers.
 
 
+### OmniKV temporal reuse (offload ablation)
+
+`omnikv_reuse_steps=1` preserves the original per-step selection. Values such as `4` and `16` refresh independently per request and observer, starting on its first decode step. Selections remain consumed by downstream sparse layers in the same step. Reuse preserves the middle history positions while sink/recent/current views advance; short histories continue admitting all available positions until the budget is full.
+
+Full-attention layers and raw score output still run every step. GPU candidate-length gating skips history scans in score reduction and Top-K on reuse steps; the existing cache-hit and missing-KV transfer path remains active. Scores, layer profiles, budgets and defaults are unchanged. Reuse supports single-GPU offload, eager and CUDA Graph execution, without prefix caching.
+
+```python
+llm = LLM(model_path, sparse_method="omnikv", enable_omnikv_offload=True,
+          omnikv_reuse_steps=4)
+```
+
+## LeaseSparse
+
+`leasesparse` currently supports Qwen2.5-7B-Instruct-1M on one GPU with BF16, in eager execution and CUDA Graph. Prefill uses full causal attention; every decode layer uses a sparse view.
+
+The default ordinary EMA configuration is: `leasesparse_alpha=0.2`, `leasesparse_block_size=16`, `leasesparse_reuse_steps=16`, and `leasesparse_max_stale_steps=16`. Its budget is `decode_keep_tokens=3968`, `sink_keep_tokens=64`, and `recent_keep_tokens=64`. Source layers are `leasesparse_sources=[0,1,2,3,7,10,12,14,16,18,19,23]`. These method-specific defaults leave other methods unchanged.
+
+Set `leasesparse_reuse_steps=4` and `leasesparse_max_stale_steps=4` for four-step leases. Set `leasesparse_sources=list(range(28))` for independent per-layer selection without cross-layer reuse. Set both step fields to `1` to refresh every step, consuming each selection on the next step. Defaults remain 16 steps and 12 groups.
+
+`enable_leasesparse_offload=True` stores complete layer histories on CPU and uses one GPU pool of 4096 token slots per request and layer for a 4096-position attention view. Resident KV is referenced in place; each layer loads missing KV for its next selection only after finishing its current attention read; `False` keeps complete histories on GPU. A refresh step consumes the old selection, with the new view first consumed at each layer's entry on the next step. `leasesparse_trace=True` records trigger, selection, submission, commit, and per-layer first-use steps. Tracing synchronizes the GPU and should be disabled for throughput measurements. Prefix caching, multiple GPUs, KV quantization, and sparse prefill are unsupported.
+
+```python
+llm = LLM(model_path, sparse_method="leasesparse")
+```
+
+
+Set `leasesparse_predictor_path` to a historical-mass predictor checkpoint; an empty string preserves default EMA. The predictor requires the mass architecture, eight historical queries, four future steps, and matching unscaled RoPE. Explicitly set four-step leases and 28 independent layers. Prediction initializes from the prefill tail and refreshes every four steps, including generated historical blocks as candidates. Both offloaded/resident KV and eager/CUDA Graph execution are supported. The first prediction compiles the network; graph startup warms both reuse and refresh paths by default.
+
+```python
+llm = LLM(
+    model_path, sparse_method="leasesparse",
+    leasesparse_predictor_path=predictor_checkpoint,
+    leasesparse_reuse_steps=4, leasesparse_max_stale_steps=4,
+    leasesparse_sources=list(range(28)),
+)
+```
+
 ## OmniKV KV offload
 
 OmniKV offload keeps full-attention KV on GPU and sparse-layer history in CPU
@@ -239,3 +276,33 @@ contract.
 
 `quest_token_budget` is no longer a runtime input. Passing it fails fast; remove
 it and configure the three common keep-token fields instead.
+
+## AttentionPredictor
+
+`attnpredict` targets single-GPU BF16 dense Qwen2/Qwen2.5 and Qwen3 models.
+Pass a matching CNN checkpoint through `attnpredict_model_path`. Layers 0–1
+remain dense; later layers predict their next-step KV selection from 64 rows
+of attention-probability history, max-pooled in 16-token blocks. Headwise CNN
+scores are reduced by maximum before Top-K. The default budget is 4096 with
+64 sink and 64 recent tokens; the current decode token is appended separately.
+Periodic calibration is disabled.
+
+Sparse layers use CPU history and independent GPU residency caches. Eager and
+decode CUDA Graph execution are supported; prefix caches, multiple GPUs,
+quantized KV and sparse prefill are unsupported. Initialization follows the
+legacy implementation: use at most 64 queries from the final prefill chunk,
+left-padding missing history rows with zeros.
+
+```python
+llm = LLM(model_path, sparse_method="attnpredict",
+          attnpredict_model_path=predictor_path)
+```
+
+Prediction and selected-KV prefetch use independent per-layer CUDA streams.
+The next decode step waits at each layer's consumer. The model graph and
+per-layer prediction graphs communicate through external CUDA events; no
+forward-end prediction barrier is inserted. Request release waits before cache
+reuse. Scores, selections, and request metadata remain layer-private. CNN heads
+are evaluated independently to bound concurrent workspace, without changing
+prediction or selection semantics. KV uses the existing OmniKV residency pool
+and GPU-indexed miss-only host gathers.

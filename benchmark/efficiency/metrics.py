@@ -118,8 +118,8 @@ class DecodeOnlyWindow:
 
     def __init__(self, concurrency, steps, warmup_steps, *, synchronize, clock,
                  graph_stats):
-        if concurrency < 1 or steps < 1 or warmup_steps < 1:
-            raise ValueError("Decode window requires positive concurrency, steps and warmup")
+        if concurrency < 1 or steps < 1 or warmup_steps < 0:
+            raise ValueError("Decode window requires positive concurrency/steps and non-negative warmup")
         self.concurrency = concurrency
         self.target_steps = steps
         self.warmup_steps = warmup_steps
@@ -219,10 +219,14 @@ class PipelinedDecodeWindow(DecodeOnlyWindow):
     @property
     def needs_boundary(self):
         return self.result is None and (
-            (self.started is None and self.warmed == self.warmup_steps)
+            (self.started is None and self.ids is not None and self.warmed == self.warmup_steps)
             or (self.started is not None and self.steps == self.target_steps))
 
-    def boundary(self):
+    def boundary(self, *, ready_request_ids=()):
+        if self.warmup_steps == 0 and self.started is None and ready_request_ids:
+            ids = tuple(sorted(ready_request_ids))
+            if len(ids) == self.concurrency and len(set(ids)) == self.concurrency:
+                self.ids = ids
         if not self.needs_boundary:
             return
         if self.pending:

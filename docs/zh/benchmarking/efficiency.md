@@ -8,6 +8,8 @@
 
 ## 入口与最小示例
 
+连续decode支持`--sparse-method`传入逗号分隔的配置标签，并用`--method-configs @<CONFIG.json>`映射到各自的`sparse_method`与`hyper_params`。该模式要求`--monitor-gpus`，逐方法检查GPU空闲并顺序执行；仅保留输出目录的`记录.md`，临时原始结果在校验后删除。配置值支持环境变量，结果文件已存在时拒绝覆盖。
+
 | 目的 | 入口 |
 | --- | --- |
 | 请求 TTFT/TPOT、E2E、fixed/churn 对照 | `benchmark/efficiency/bench_probe.py`；可用 `scripts/benchmarks/run_efficiency_probe.sh` 编排 |
@@ -57,6 +59,8 @@ sink/recent/selected/full layers，同名预算不保证相同工作量或质量
   标准测试发现可疑 case 后使用，参数为 `SYSTEM MODEL_PATH GPUS`。
   当前 wrapper 支持 vanilla/SnapKV/vLLM vanilla、默认 TP2；
   需要 `nsys` 与 performance-counter 权限，输出 `timeline.nsys-rep`。
+
+原生 Sparse-vLLM 可显式设置 `--num-warmups 0 --decode-only-warmup-steps 0`，仅保留引擎启动预热；连续窗口从满批首个 decode 步开始。输出128时可计时127步。此协议与额外预热协议分开比较。
 
 <a id="measurement-contract"></a>
 

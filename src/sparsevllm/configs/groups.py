@@ -36,14 +36,24 @@ class SparseMethodConfig:
     """Shared and method-specific sparse-attention settings."""
 
     sparse_method: str = ""
+    attnpredict_model_path: str = ""
+    enable_leasesparse_offload: bool = True
+    leasesparse_predictor_path: str = ""
+    leasesparse_alpha: float = 0.2
+    leasesparse_reuse_steps: int = 16
+    leasesparse_max_stale_steps: int = 16
+    leasesparse_block_size: int = 16
+    leasesparse_sources: tuple[int, ...] = (0, 1, 2, 3, 7, 10, 12, 14, 16, 18, 19, 23)
+    leasesparse_trace: bool = False
+    omnikv_reuse_steps: int = 1
     enable_omnikv_offload: bool = False
     omnikv_offload_cache_tokens: int | None = None
     # Physical cache/runtime ownership can also come from a prefill method.
     # This derived field is normalized before cache and prefix-cache setup.
     resolved_cache_sparse_method: str = field(default="", init=False)
     sink_keep_tokens: int = 64
-    recent_keep_tokens: int = 512
-    decode_keep_tokens: int = 4096
+    recent_keep_tokens: int | None = None
+    decode_keep_tokens: int | None = None
 
     obs_layer_ids: list[int] = field(default=None, init=False)
     full_attention_layers: str | list[int] = "auto"

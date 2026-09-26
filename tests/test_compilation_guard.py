@@ -56,6 +56,25 @@ def test_concurrent_compilers_share_one_budget():
         assert sum(pool.map(attempt, range(12))) == 3
 
 
+def test_compile_notifications_do_not_flood_progress_but_keep_budget_errors():
+    from sparsevllm.utils.log import logger
+
+    messages = []
+    sink = logger.add(lambda message: messages.append(str(message)), level="WARNING", format="{message}")
+    guard = RuntimeCompilationGuard(8, rank=0)
+    try:
+        for _ in range(8):
+            guard.before_compile("test", "varying_length")
+        assert len(messages) == 1
+        assert "varying_length" in messages[0]
+        assert len(messages[0].splitlines()) == 1
+        with pytest.raises(RuntimeCompilationError, match="count=9") as error:
+            guard.before_compile("test", "varying_length")
+        assert "test_compile_notifications" in str(error.value)
+    finally:
+        logger.remove(sink)
+
+
 def test_upstream_compilation_failure_is_not_hidden():
     class Compiler:
         def build(self):

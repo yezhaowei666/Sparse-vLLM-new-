@@ -21,6 +21,43 @@ Sparse-vLLM 围绕 cache-manager-first sparse runtime 构建。engine 支持 phy
 Sparse-vLLM 在 public command、`LLM(...)`、runtime config 与内部消费者中统一使用 `sparse_method`。
 
 
+### OmniKV 跨步复用（卸载消融）
+
+`omnikv_reuse_steps=1` 默认关闭，保持原有逐步选块。设为 `4` 或 `16` 时，每个请求在各观察层首次 decode 选块，之后按指定间隔刷新；当步观察层产生的选择仍供当步后续稀疏层使用。复用步保留中间历史集合，sink/recent/current 每步按当前位置构建。历史尚未填满预算时保持逐步纳入可用历史。
+
+全注意力层仍每步计算，原始注意力分数仍会输出；复用步通过GPU候选长度门控跳过评分归约和Top-K的历史扫描，继续走已有缓存命中与缺失KV搬运路径。只改变选择刷新频率，不改变原有评分、层表、预算或默认行为。支持单卡卸载、普通执行和CUDA Graph；开启复用时不支持前缀缓存。
+
+```python
+llm = LLM(model_path, sparse_method="omnikv", enable_omnikv_offload=True,
+          omnikv_reuse_steps=4)
+```
+
+## LeaseSparse
+
+`leasesparse` 目前支持 Qwen2.5-7B-Instruct-1M、单卡 BF16，以及普通执行和 CUDA Graph。Prefill 保持完整因果注意力；decode 全部层使用稀疏视图。
+
+默认使用普通 EMA（`leasesparse_alpha=0.2`）、16-token 块（`leasesparse_block_size=16`）、16 步租期和最大陈旧步数（`leasesparse_reuse_steps=16`、`leasesparse_max_stale_steps=16`）。选择预算为 `decode_keep_tokens=3968`、`sink_keep_tokens=64`、`recent_keep_tokens=64`；源层 `leasesparse_sources=[0,1,2,3,7,10,12,14,16,18,19,23]`。这些方法专属默认值不会改变其他方法。
+
+支持通过 `leasesparse_reuse_steps=4`、`leasesparse_max_stale_steps=4` 使用 4 步租期；将 `leasesparse_sources` 设为 `list(range(28))` 可让每层独立更新，不做跨层复用。两个步数字段同时设为 `1` 时，每层每步都刷新，下一步使用新选择。默认仍为 16 步、12 组。
+
+`enable_leasesparse_offload=True` 默认将各层完整历史放在 CPU，每层每请求在 GPU 使用一个4096槽位的统一池，供4096位置的注意力视图使用。驻留KV原地引用，每层读完当前注意力后才覆盖不再需要的槽位，加载下一集合缺失的KV；设为 `False` 时完整历史留在 GPU。刷新步仍使用旧集合，下一步在各层入口切换。`leasesparse_trace=True` 可记录触发、选择、提交、切换及各层首次使用步号；诊断会同步 GPU，不用于测吞吐。不支持前缀缓存、多卡、KV 量化或稀疏 prefill。
+
+```python
+llm = LLM(model_path, sparse_method="leasesparse")
+```
+
+
+通过 `leasesparse_predictor_path` 加载历史份额预测器；空字符串保持默认EMA。预测器要求mass架构、8步Query历史、未来4步、与模型匹配的未缩放RoPE，且必须显式使用4步租期和28层独立选择。它从prefill尾部初始化，之后每4步预测一次；生成阶段的新历史块也参与候选。支持卸载/不卸载以及CUDA Graph。首次使用会编译预测网络；图模式默认在启动时预热复用、刷新两条执行路径。
+
+```python
+llm = LLM(
+    model_path, sparse_method="leasesparse",
+    leasesparse_predictor_path=predictor_checkpoint,
+    leasesparse_reuse_steps=4, leasesparse_max_stale_steps=4,
+    leasesparse_sources=list(range(28)),
+)
+```
+
 ## OmniKV KV offload
 
 OmniKV offload 将全注意力层 KV 保留在 GPU，稀疏层历史保存在 CPU，
@@ -193,3 +230,14 @@ host 容量增加 1 个 token，扩展 driver 的有界历史配额。CUDA Graph
 - `quest_skip_layers`：在 decode 中保持前 N 个 layer 为 dense。
 
 `quest_token_budget` 已不再是 runtime input。传入该参数会快速失败；请删除它，改为配置上述三个通用 keep-token 字段。
+
+## AttentionPredictor
+
+`attnpredict` 支持单卡BF16的Qwen2／Qwen2.5、Qwen3稠密模型，使用 `attnpredict_model_path` 指定匹配模型的CNN权重。前两层完整注意力，其余层以64步概率历史、16-token块预测下一步共享KV集合；各头预测分数取最大值后Top-K，默认预算4096（sink/recent各64），当前token另行加入。暂不启用周期校准。预测与KV预取在各层独立CUDA流执行，下一步到该层消费时等待其完成事件。模型图与逐层预测图通过外部事件连接，不在前向末尾统一等待；请求释放时等待相关后台访问结束。逐层保存分数、选择和请求元数据，CNN按独立头分批执行以控制并发工作区；CPU历史、GPU驻留命中和缺失搬运沿用OmniKV组件。
+
+稀疏层完整KV卸载到CPU，GPU使用独立层驻留缓存；支持普通执行和decode CUDA Graph。不支持前缀缓存、多卡、KV量化或稀疏prefill。短末尾分块沿用旧版策略，只用当前分块末尾最多64个query初始化，不足64行前补零。
+
+```python
+llm = LLM(model_path, sparse_method="attnpredict",
+          attnpredict_model_path=predictor_path)
+```

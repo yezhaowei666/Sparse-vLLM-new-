@@ -48,7 +48,7 @@ class OmniKVPoolPlan:
         return self.fixed_bytes + slots * self.slot_bytes
 
 
-def plan_omnikv_pools(config, full_layers, num_layers, rows, per_layer):
+def plan_omnikv_pools(config, full_layers, num_layers, rows, per_layer, *, independent_layers=False, extra_tokens=0):
     full = set(full_layers)
     # GPU-only OmniKV consumes full history before its first observer too.
     if full:
@@ -60,7 +60,7 @@ def plan_omnikv_pools(config, full_layers, num_layers, rows, per_layer):
         )
     selected = min(
         config.max_model_len,
-        config.sink_keep_tokens + config.decode_keep_tokens + config.recent_keep_tokens,
+        config.sink_keep_tokens + config.decode_keep_tokens + config.recent_keep_tokens + extra_tokens,
     )
     if selected == 0:
         raise ValueError(
@@ -79,7 +79,7 @@ def plan_omnikv_pools(config, full_layers, num_layers, rows, per_layer):
         if layer in full:
             group = layer
         else:
-            layer_groups[layer] = group
+            layer_groups[layer] = layer if independent_layers else group
     groups = len(set(layer_groups.values()))
     # Logical slot table and stable compute-view table; full-layer storage plus
     # one shared full-history prefill pool and the allocator/host-map vectors.

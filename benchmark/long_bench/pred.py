@@ -4,6 +4,7 @@ import sys
 import subprocess
 import re
 import traceback
+import hashlib
 from typing import Any, Union
 from pathlib import Path
 
@@ -238,8 +239,7 @@ def _record_effective_runtime_config(
 def _append_jsonl(path: str | os.PathLike[str], record: dict[str, Any]) -> None:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
-        json.dump(record, f, ensure_ascii=False)
-        f.write("\n")
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def _write_json(path: str | os.PathLike[str], value: dict[str, Any]) -> None:
@@ -539,6 +539,7 @@ def _write_sample_record(
     out_root: str,
     task_out_path: str,
     record: dict[str, Any],
+    commit: bool = True,
 ) -> None:
     status = record.get("status")
     if status not in SAMPLE_STATUSES:
@@ -574,7 +575,6 @@ def _write_sample_record(
     }
     _append_jsonl(paths["raw"], raw_record)
     _append_jsonl(paths["parsed"], parsed_record)
-    _append_jsonl(paths["sample"], record)
 
     # Keep the historical per-task files for benchmark/long_bench/eval.py.
     task_record = {
@@ -590,6 +590,83 @@ def _write_sample_record(
     if "error" in record:
         task_record["error"] = record["error"]
     _append_jsonl(task_out_path, task_record)
+    # The full sample record is the commit journal; other files are derived.
+    if commit:
+        _append_jsonl(paths["sample"], record)
+
+
+def _resume_samples(out_root: str, datasets: list[str]) -> set[tuple[str, int]]:
+    path = Path(_artifact_paths(out_root)["sample"])
+    lines = path.read_bytes().splitlines(keepends=True) if path.exists() else []
+    retained, failed, observed = [], [], set()
+    for index, line in enumerate(lines):
+        if index == len(lines)-1 and not line.endswith(b"\n"):
+            print(f"Resume: discard incomplete final journal line: {path}", file=sys.stderr)
+            break
+        record = json.loads(line)
+        key = (record["dataset"], record["source_idx"])
+        if key[0] not in datasets or not isinstance(key[1], int) or key in observed:
+            raise ValueError(f"Invalid or duplicate resume sample identity: {key}")
+        if record["status"] not in SAMPLE_STATUSES:
+            raise ValueError(f"Invalid resume sample status: {record['status']}")
+        if record["status"] == "success":
+            if not isinstance(record["pred"], str) or not isinstance(record["raw_pred"], str) or record["answers"] is None:
+                raise ValueError(f"Invalid successful resume sample: {key}")
+        observed.add(key)
+        if record["status"] in {"success", "skipped_by_policy"}:
+            retained.append(record)
+        else:
+            failed.append(record)
+    if failed:
+        _append_jsonl(Path(out_root)/"resume_attempts.jsonl", {"retry_samples": failed})
+        print(f"Resume: retry {len(failed)} failed samples", file=sys.stderr)
+    # Publish the recovered journal before rebuilding any derived file. A
+    # second interruption during reconstruction leaves committed samples intact.
+    _write_jsonl_atomic(path, retained)
+    for name in [*(f"{d}.jsonl" for d in datasets), "raw_outputs.jsonl", "parsed_outputs.jsonl"]:
+        Path(out_root, name).write_text("", encoding="utf-8")
+    for record in retained:
+        _write_sample_record(out_root=out_root, task_out_path=str(Path(out_root)/f"{record['dataset']}.jsonl"),
+                             record=record, commit=False)
+    return {(r["dataset"], r["source_idx"]) for r in retained}
+
+
+def _resume_contract(args, datasets, infer_config):
+    options = {k:v for k,v in vars(args).items()
+               if k not in {"resume", "output_root", "worker_rank", "worker_world_size", "hyper_param"}}
+    files = [Path(get_longbench_data_path(d, args.e)) for d in datasets]
+    files += sorted((REPO_ROOT/"src/sparsevllm").rglob("*.py"))
+    files += sorted((REPO_ROOT/"benchmark/long_bench").rglob("*.py"))
+    files += sorted((REPO_ROOT/"benchmark/long_bench/config").glob("*.json"))
+    files += sorted((REPO_ROOT/"benchmark/model_adapters").rglob("*.py"))
+    for name, value in infer_config.items():
+        if isinstance(value, str) and value and ("checkpoint" in name or "predictor_path" in name):
+            files.append(Path(value))
+    if args.deltakv_checkpoint_path:
+        checkpoint = Path(args.deltakv_checkpoint_path)
+        files += sorted(p for p in checkpoint.rglob("*") if p.is_file()) if checkpoint.is_dir() else [checkpoint]
+    for root in {Path(args.model_path), Path(args.tokenizer_path or args.model_path)}:
+        files += sorted(root.glob("*.json"))
+    digest = hashlib.sha256()
+    for path in sorted(set(files)):
+        digest.update(str(path.resolve()).encode())
+        with path.open("rb") as handle:
+            digest.update(hashlib.file_digest(handle, "sha256").digest())
+    weights = [(str(p.resolve()), p.stat().st_size, p.stat().st_mtime_ns)
+               for p in sorted(Path(args.model_path).glob("*.safetensors"))]
+    return dict(options=options, datasets=datasets, infer_config=infer_config,
+                inputs_sha256=digest.hexdigest(), model_weights=weights, torch_version=str(torch.__version__))
+
+
+def _prepare_resume_contract(out_root, contract, resume):
+    path = Path(out_root)/"resume_contract.json"
+    # JSON-normalize tuples before comparing a contract read from disk.
+    contract = json.loads(json.dumps(contract))
+    if resume:
+        if json.loads(path.read_text(encoding="utf-8")) != contract:
+            raise ValueError("Resume configuration, data, checkpoint or code changed; use a new output directory.")
+    else:
+        _write_json(path, contract)
 
 
 def load_model_and_tokenizer(rank, args, infer_config):
@@ -635,7 +712,9 @@ def get_pred(rank, data, dataset_info, args, model, tokenizer, model_max_length,
 
     batch_size = len(data) if args.batch_size <= 0 else args.batch_size
     failures: list[dict[str, Any]] = []
-    for i in tqdm(range(0, len(data), batch_size), desc=f'[Rank {rank}] {dataset}'):
+    completed = dataset_info.get('completed', 0)
+    progress = tqdm(total=completed+len(data), initial=completed, desc=f'[Rank {rank}] {dataset}', unit='sample')
+    for i in range(0, len(data), batch_size):
         batch_data = data[i:i + batch_size]
         prompts = []
         prepared_records: list[dict[str, Any]] = []
@@ -768,10 +847,12 @@ def get_pred(rank, data, dataset_info, args, model, tokenizer, model_max_length,
                 }
             )
             _write_sample_record(out_root=out_root, task_out_path=out_path, record=ok)
+            progress.update(1)
 
         if failures:
             break
 
+    progress.close()
     if failures:
         first = failures[0]
         raise RuntimeError(
@@ -795,7 +876,7 @@ def worker(
         _worker_output_root(out_root, rank) if world_size > 1 else out_root
     )
     os.makedirs(worker_out_root, exist_ok=True)
-    if world_size > 1:
+    if world_size > 1 and not args.resume:
         for dataset in datasets:
             Path(worker_out_root, f"{dataset}.jsonl").write_text(
                 "", encoding="utf-8"
@@ -803,16 +884,14 @@ def worker(
         for artifact in _artifact_paths(worker_out_root).values():
             Path(artifact).write_text("", encoding="utf-8")
     seed_everything(args.seed)
-    model, tokenizer, model_max_length, eos_token_ids = load_model_and_tokenizer(
-        rank,
-        args,
-        infer_config,
-    )
-    if rank == 0:
-        _record_effective_runtime_config(generate_fn=model, out_root=out_root)
-    graph_status_before = _decode_cuda_graph_status(generate_fn=model, rank=rank)
+    completed = _resume_samples(worker_out_root, datasets) if args.resume else set()
+    model = None
+    tokenizer = (AutoTokenizer.from_pretrained(args.tokenizer_path or args.model_path, trust_remote_code=True)
+                 if args.min_prompt_tokens is not None else None)
     
     for dataset in datasets:
+        if (dataset, -1) in completed:
+            continue
         data_path = get_longbench_data_path(dataset, args.e)
         if not os.path.isfile(data_path):
             raise FileNotFoundError(
@@ -885,6 +964,21 @@ def worker(
         
         data_subset = data[rank::world_size]
         if not data_subset: continue
+        for selected_idx, row in enumerate(data_subset):
+            row.setdefault('_longbench_selected_idx', selected_idx)
+        expected = {(dataset, row.get('_longbench_source_idx', row['_source_idx'])) for row in data_subset}
+        if not {key for key in completed if key[0] == dataset} <= expected:
+            raise ValueError(f"Resume contains samples outside rank {rank}'s selected data: {dataset}")
+        remaining = [row for row in data_subset
+                     if (dataset, row.get('_longbench_source_idx', row['_source_idx'])) not in completed]
+        if not remaining:
+            tqdm(total=len(data_subset), initial=len(data_subset), desc=f'[Rank {rank}] {dataset}', unit='sample').close()
+            continue
+        if model is None:
+            model, tokenizer, model_max_length, eos_token_ids = load_model_and_tokenizer(rank, args, infer_config)
+            if rank == 0:
+                _record_effective_runtime_config(generate_fn=model, out_root=out_root)
+            graph_status_before = _decode_cuda_graph_status(generate_fn=model, rank=rank)
         
         dataset_info = {
             'dataset': dataset,
@@ -893,11 +987,12 @@ def worker(
             'max_length': max_length_limit,
             'out_path': os.path.join(worker_out_root, f"{dataset}.jsonl"),
             'out_root': worker_out_root,
+            'completed': len(data_subset)-len(remaining),
         }
         
         get_pred(
             rank,
-            data_subset,
+            remaining,
             dataset_info,
             args,
             model,
@@ -906,6 +1001,11 @@ def worker(
             eos_token_ids,
         )
         torch.cuda.empty_cache()
+
+    if model is None:
+        _write_json(Path(out_root)/f"operator_runtime_stats_rank{rank}.json",
+                    dict(status="success", world_ranks=[], all_samples_resumed=True))
+        return
 
     try:
         from sparsevllm.utils.profiler import profiler
@@ -1029,6 +1129,7 @@ def parse_args():
     parser.add_argument("--worker_rank", type=int, default=-1)
     parser.add_argument("--worker_world_size", type=int, default=1)
     parser.add_argument("--output_root", type=str, default=None)
+    parser.add_argument("--resume", action="store_true", help="Resume committed samples in an explicit --output_root.")
     parser.add_argument(
         "--max_model_len",
         type=int,
@@ -1043,8 +1144,11 @@ def main() -> None:
     args = None
     out_root = None
     phase = "invalid_input"
+    run_started = False
     try:
         args = parse_args()
+        if args.resume and not args.output_root:
+            raise ValueError("--resume requires the previous --output_root.")
 
         model_name = args.model
         compressor_name = (
@@ -1062,8 +1166,6 @@ def main() -> None:
                 f"{model_name}/{compressor_name}_{time_tag}",
             )
         os.makedirs(out_root, exist_ok=True)
-        if args.worker_rank < 0:
-            _write_run_status(out_root, "running")
         print(f"Results will be saved in: {out_root}")
 
         if args.num_samples is not None and args.num_samples <= 0:
@@ -1091,14 +1193,6 @@ def main() -> None:
             dataset2maxlen = json.load(f)
         validate_longbench_data_paths(datasets, args.e)
 
-        if args.worker_rank < 0:
-            for dataset in datasets:
-                with open(os.path.join(out_root, f"{dataset}.jsonl"), 'w') as f:
-                    pass
-            for artifact in ("raw_outputs.jsonl", "parsed_outputs.jsonl", "sample_results.jsonl", "longbench_mini_selection.jsonl"):
-                with open(os.path.join(out_root, artifact), "w", encoding="utf-8") as f:
-                    pass
-
         max_length_limit = DEFAULT_MAX_MODEL_LEN if args.max_model_len is None else args.max_model_len
         if max_length_limit <= 0:
             raise ValueError(f"--max_model_len must be > 0, got {max_length_limit}.")
@@ -1106,6 +1200,12 @@ def main() -> None:
         infer_config = _build_infer_config(args)
 
         if args.worker_rank < 0:
+            _prepare_resume_contract(out_root, _resume_contract(args, datasets, infer_config), args.resume)
+            run_started = True
+            _write_run_status(out_root, "running")
+            if not args.resume:
+                for name in [*(f"{d}.jsonl" for d in datasets), "raw_outputs.jsonl", "parsed_outputs.jsonl", "sample_results.jsonl", "longbench_mini_selection.jsonl"]:
+                    (Path(out_root)/name).write_text("", encoding="utf-8")
             resolved_config = {
                 "model": args.model,
                 "model_path": args.model_path,
@@ -1130,9 +1230,8 @@ def main() -> None:
                 "requested_runtime": _requested_runtime_config(args, infer_config),
                 "args": vars(args),
             }
-            with open(os.path.join(out_root, "resolved_config.json"), "w", encoding="utf-8") as f:
-                json.dump(resolved_config, f, ensure_ascii=False, indent=2)
-                f.write("\n")
+            if not args.resume:
+                _write_json(Path(out_root)/"resolved_config.json", resolved_config)
 
         phase = "model"
         if args.worker_rank >= 0:
@@ -1210,7 +1309,7 @@ def main() -> None:
         failure_status = "metric_failed" if phase == "metric" else (
             "model_failed" if phase == "model" else "invalid_input"
         )
-        if args is None or args.worker_rank < 0:
+        if args is None or args.worker_rank < 0 and (not args.resume or run_started):
             _try_write_failed_run_status(
                 out_root or (args.output_root if args is not None else None),
                 failure_status,
@@ -1222,7 +1321,7 @@ def main() -> None:
         failure_status = "model_failed" if phase == "model" else (
             "metric_failed" if phase == "metric" else "invalid_input"
         )
-        if args is None or args.worker_rank < 0:
+        if args is None or args.worker_rank < 0 and (not args.resume or run_started):
             _try_write_failed_run_status(
                 out_root or (args.output_root if args is not None else None),
                 failure_status,

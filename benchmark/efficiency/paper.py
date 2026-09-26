@@ -69,9 +69,11 @@ def run_paper_decode(args):
 
     if args.scenario != "fixed" or args.prompt_length_jitter or args.output_length_jitter:
         raise ValueError("Paper windows currently require fixed batch and zero length jitter")
-    if (args.decode_only_steps < 1 or args.decode_only_warmup_steps < 1
+    if (args.decode_only_steps < 1 or args.decode_only_warmup_steps < 0
             or args.num_iters < 1 or args.num_warmups < 0):
         raise ValueError("Invalid paper window/repetition count")
+    if args.decode_only_warmup_steps == 0 and args.engine != "sparsevllm":
+        raise ValueError("Zero decode warmup is supported by the native Sparse-vLLM adapter only")
     if args.seed != 42:
         raise ValueError("Current shared stage adapters use seed=42; extend them before changing the seed")
     if any(n <= 0 for n in args.prompt_lens + args.output_lens + args.batch_sizes):
@@ -180,3 +182,55 @@ def run_paper_decode(args):
     except BaseException as error:
         write("run_status.json", {"status": "failed", "error": repr(error)})
         raise
+
+
+def run_method_variants(args, variants):
+    """Run named configurations sequentially; retain only a Markdown record."""
+    from argparse import Namespace
+    from tempfile import TemporaryDirectory
+    from benchmark.efficiency.bench_probe import _parse_json_arg
+
+    if not args.decode_only_steps or not args.monitor_gpus:
+        raise ValueError("Method variants require --decode-only-steps and --monitor-gpus")
+    expanded = os.path.expandvars(json.dumps(variants))
+    if "${" in expanded:
+        raise ValueError("Unresolved environment variable in method configs")
+    variants = json.loads(expanded)
+    labels = args.sparse_method.split(",")
+    cases = [(label, variants[label]) for label in labels]
+    root = Path(args.output_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    failed = []
+    with (root / "记录.md").open("x") as record:
+        record.write("# Continuous decode comparison\n\n```json\n" + json.dumps(vars(args), ensure_ascii=False) + "\n```\n")
+        for label, spec in cases:
+            active = subprocess.check_output(["nvidia-smi", "-i", args.monitor_gpus,
+                "--query-compute-apps=pid", "--format=csv,noheader,nounits"], text=True).strip()
+            if active:
+                raise RuntimeError(f"GPU busy before {label}: {active}")
+            with TemporaryDirectory(prefix="sparse-probe-") as temporary:
+                case = Namespace(**vars(args))
+                case.sparse_method = spec["sparse_method"]
+                case.hyper_params = json.dumps({**_parse_json_arg(args.hyper_params), **spec["hyper_params"]})
+                case.output_dir = temporary
+                print(f"\n[{label}] {case.sparse_method}: {case.hyper_params}", flush=True)
+                record.write(f"\n## {label}\n\n```json\n{case.hyper_params}\n```\n")
+                record.flush()
+                try:
+                    run_paper_decode(case)
+                except RuntimeError as error:
+                    failed.append(label)
+                    record.write(f"\nFAILED: {error}\n")
+                    log = Path(temporary) / "failure.log"
+                    if log.exists():
+                        record.write("\n```text\n" + log.read_text()[-12000:] + "\n```\n")
+                    print(f"[{label}] FAILED: {error}", flush=True)
+                    continue
+                results = [json.loads(line) for line in (Path(temporary) / "performance.jsonl").read_text().splitlines()]
+                for result in results:
+                    result.pop("repetitions", None)
+                    record.write("\n```json\n" + json.dumps(result, ensure_ascii=False) + "\n```\n")
+                    print(f"[{label}] {result['decode_stage_throughput_tps']:.2f} token/s; peak {result['peak_memory_gb']:.2f} GB", flush=True)
+                record.flush()
+    if failed:
+        raise RuntimeError(f"Failed method variants: {failed}")

@@ -192,3 +192,24 @@ def build_omnikv_keep_and_slots(
         BLOCK=block,
     )
     return keep_indices, active_slots, new_context_lens
+
+
+@triton.jit
+def _commit_reuse(Cache, Starts, Counts, Rows, Lengths, Writes, Refresh, Indices,
+                  K: tl.constexpr, N: tl.constexpr, SB: tl.constexpr, BLOCK: tl.constexpr):
+    b = tl.program_id(0)
+    if tl.load(Writes+b) >= 0:
+        row = tl.load(Rows+b)
+        refresh = tl.load(Refresh+b)
+        if refresh:
+            for start in range(0, K, BLOCK):
+                i = start + tl.arange(0, BLOCK)
+                index = tl.load(Indices+b*SB+i, i<N, -1)
+                tl.store(Cache+row*K+i, index, i<K)
+            tl.store(Starts+row, tl.load(Lengths+b))
+        tl.atomic_add(Counts+tl.where(refresh,0,1), 1)
+
+
+def commit_omnikv_reuse(cache, starts, counts, rows, lengths, writes, refresh, indices):
+    _commit_reuse[(rows.numel(),)](cache, starts, counts, rows, lengths, writes, refresh,
+        indices, cache.shape[1], indices.shape[1], indices.stride(0), 256)

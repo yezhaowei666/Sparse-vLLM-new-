@@ -1281,3 +1281,17 @@ def test_triton_provider_owns_launch_config_and_workspace_preparation():
     assert kwargs["num_kv_heads"] == 8
     assert kwargs["gqa_block_n"] == 8
     assert kwargs["gqa_num_warps"] == 4
+
+
+def test_lease_predictor_removes_unused_score_output_contract():
+    """The predictor uses Query history; provider binding must not require EMA logits."""
+    config = SimpleNamespace(num_attention_heads=28, num_key_value_heads=4, head_dim=128, dtype=torch.bfloat16)
+    specs = [build_mha_decode_attention_spec(
+        config, sparse_method="leasesparse", attention_tp_size=1,
+        max_batch_size=2, cuda_graph=True,
+        runtime_config=SimpleNamespace(leasesparse_predictor_path=path),
+    ) for path in ("", "predictor.pt")]
+    assert specs[0].may_require_attention_scores
+    assert not specs[1].may_require_attention_scores
+    assert specs[0].head_dim == specs[1].head_dim
+    assert specs[0].layer_varying_page_table == specs[1].layer_varying_page_table

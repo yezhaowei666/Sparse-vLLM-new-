@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum, auto
 
 from sparsevllm.distributed.topology import ParallelTopology
@@ -43,6 +43,8 @@ CANONICAL_SPARSE_METHODS = {
     "h2o",
     "pyramidkv",
     "omnikv",
+    "leasesparse",
+    "attnpredict",
     "quest",
     "rkv",
     "skipkv",
@@ -222,6 +224,8 @@ _PREFILL_LAYER_VARYING_PAGE_TABLE = {
     "h2o": True,
     "pyramidkv": True,
     "omnikv": False,
+    "leasesparse": False,
+    "attnpredict": False,
     "quest": False,
     "rkv": True,
     "skipkv": True,
@@ -237,6 +241,8 @@ if set(_PREFILL_LAYER_VARYING_PAGE_TABLE) != CANONICAL_SPARSE_METHODS:
 _DECODE_ATTENTION_SCORE_KINDS = {
     "pyramidkv": AttentionScoreKind.RAW_QK_REDUCED,
     "omnikv": AttentionScoreKind.RAW_QK_PER_HEAD,
+    "leasesparse": AttentionScoreKind.RAW_QK_PER_HEAD,
+    "attnpredict": AttentionScoreKind.RAW_QK_PER_HEAD,
     "skipkv": AttentionScoreKind.RAW_QK_PER_HEAD,
     "deltakv": AttentionScoreKind.RAW_QK_PER_HEAD,
 }
@@ -334,12 +340,14 @@ def sparse_decode_attention_requires_scores(
     method: str | None,
     *,
     h2o_decode_eviction: bool = False,
+    leasesparse_predictor_path: str = "",
 ) -> bool:
     """Return whether a prepared decode implementation must support scores."""
 
     return (
         sparse_decode_attention_score_kind(
             method, h2o_decode_eviction=h2o_decode_eviction,
+            leasesparse_predictor_path=leasesparse_predictor_path,
         )
         is not AttentionScoreKind.NONE
     )
@@ -349,6 +357,7 @@ def sparse_decode_attention_score_kind(
     method: str | None,
     *,
     h2o_decode_eviction: bool = False,
+    leasesparse_predictor_path: str = "",
     attention_cache_layout: str = "explicit_kv",
 ) -> AttentionScoreKind:
     """Return the score representation consumed by sparse decode logic.
@@ -363,6 +372,8 @@ def sparse_decode_attention_score_kind(
     normalized = normalize_sparse_method(method)
     if normalized not in CANONICAL_SPARSE_METHODS:
         raise ValueError(f"Unknown sparse method {normalized!r}.")
+    if normalized == "leasesparse" and leasesparse_predictor_path:
+        return AttentionScoreKind.NONE
     if normalized == "h2o" and h2o_decode_eviction:
         if attention_cache_layout == "mla_latent":
             return AttentionScoreKind.RAW_QK_REDUCED
@@ -378,9 +389,9 @@ _MOE_SPARSE_METHODS = frozenset(
 )
 
 DENSE_MODEL_COMPATIBILITY = ModelRuntimeCompatibility(
-    sparse_methods=frozenset(CANONICAL_SPARSE_METHODS),
+    sparse_methods=frozenset(CANONICAL_SPARSE_METHODS - {"leasesparse", "attnpredict"}),
     prefix_cache_methods=frozenset(PREFIX_CACHE_SUPPORTED_METHODS),
-    decode_graph_methods=frozenset(CANONICAL_SPARSE_METHODS),
+    decode_graph_methods=frozenset(CANONICAL_SPARSE_METHODS - {"leasesparse", "attnpredict"}),
 )
 
 QWEN3_MOE_EP_COMPATIBILITY = ModelRuntimeCompatibility(
@@ -440,6 +451,14 @@ MODEL_RUNTIME_COMPATIBILITY = {
         model_type: DENSE_MODEL_COMPATIBILITY
         for model_type in ("qwen2", "qwen3", "qwen3_5", "llama")
     },
+    "qwen2": replace(
+        DENSE_MODEL_COMPATIBILITY,
+        sparse_methods=DENSE_MODEL_COMPATIBILITY.sparse_methods | {"leasesparse", "attnpredict"},
+        decode_graph_methods=DENSE_MODEL_COMPATIBILITY.decode_graph_methods | {"leasesparse", "attnpredict"},
+    ),
+    "qwen3": replace(DENSE_MODEL_COMPATIBILITY,
+        sparse_methods=DENSE_MODEL_COMPATIBILITY.sparse_methods | {"attnpredict"},
+        decode_graph_methods=DENSE_MODEL_COMPATIBILITY.decode_graph_methods | {"attnpredict"}),
     "qwen3_moe": QWEN3_MOE_EP_COMPATIBILITY,
     "qwen3_5_moe": QWEN35_MOE_COMPATIBILITY,
     "minimax_m2": MINIMAX_M2_EP_COMPATIBILITY,
@@ -475,6 +494,8 @@ _DEFAULT_PREFILL_POLICY_BY_METHOD = {
     "h2o": PREFILL_POLICY_ALL_CHUNKED,
     "pyramidkv": PREFILL_POLICY_LONG_BS1FULL_SHORT_BATCH,
     "omnikv": PREFILL_POLICY_ALL_CHUNKED,
+    "leasesparse": PREFILL_POLICY_ALL_CHUNKED,
+    "attnpredict": PREFILL_POLICY_ALL_CHUNKED,
     "quest": PREFILL_POLICY_ALL_CHUNKED,
     "rkv": PREFILL_POLICY_ALL_CHUNKED,
     "skipkv": PREFILL_POLICY_ALL_CHUNKED,

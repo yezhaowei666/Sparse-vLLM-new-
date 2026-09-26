@@ -679,11 +679,11 @@ def benchmark_task(method, length, bs, args, results_dict):
                 add_wave(admission_wave_size)
 
             if window is not None:
-                window.boundary()
                 window_seqs = list(llm.scheduler.decoding)
                 window_ids = [seq.seq_id for seq in window_seqs]
                 window_contexts = [len(seq) for seq in window_seqs]
                 window_admitted = next_request_idx == bs and not llm.scheduler.waiting
+                window.boundary(ready_request_ids=window_ids if window_admitted else ())
             step_start = perf_counter()
             finished_outputs, num_tokens = llm.step()
             if synchronize_step_timing:
@@ -1046,8 +1046,8 @@ def main():
         parser.error("HiSparse stage adapter requires --output_dir for worker-side raw steps")
     if args.decode_window_steps and (args.decode_window_steps < 1 or args.synchronize_step_timing
             or not args.require_full_decode_batch or not args.output_dir
-            or args.decode_warmup_steps_after_full < 1 or args.max_decode_steps_after_full):
-        parser.error("Decode windows require full batch, positive warmup, output_dir, no step sync and complete outputs")
+            or args.decode_warmup_steps_after_full < 0 or args.max_decode_steps_after_full):
+        parser.error("Decode windows require full batch, non-negative warmup, output_dir, no step sync and complete outputs")
     if args.require_full_decode_batch and (not (args.synchronize_step_timing or args.decode_window_steps) or args.max_decode_steps_after_full):
         parser.error("Full decode batch measurement requires synchronized timing and untruncated outputs")
     if args.engine == "vllm" and not args.require_full_decode_batch:

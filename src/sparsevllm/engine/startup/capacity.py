@@ -225,7 +225,15 @@ def profiling_kv_budget_bytes(config, num_slots: int) -> int:
         config.sparse_method,
         prefill_sparse_method=getattr(config, "prefill_sparse_method", None),
     )
-    if method == "omnikv" and getattr(config, "enable_omnikv_offload", False):
+    if method == "leasesparse" and config.enable_leasesparse_offload:
+        from sparsevllm.engine.cache_manager.methods.leasesparse import lease_pool_bytes
+
+        fixed, variable = lease_pool_bytes(
+            int(layout.num_kv_layers), int(config.max_num_seqs_in_gpu),
+            bytes_per_slot // int(layout.num_kv_layers),
+        )
+        return fixed + variable * num_slots
+    if method == "attnpredict" or method == "omnikv" and getattr(config, "enable_omnikv_offload", False):
         from sparsevllm.engine.cache_manager.methods.omnikv.capacity import plan_omnikv_pools
 
         plan = plan_omnikv_pools(
@@ -233,6 +241,7 @@ def profiling_kv_budget_bytes(config, num_slots: int) -> int:
             [layout.kv_layer_index(i) for i in config.full_attention_layers],
             int(layout.num_kv_layers), int(config.max_num_seqs_in_gpu),
             bytes_per_slot // int(layout.num_kv_layers),
+            independent_layers=method == "attnpredict", extra_tokens=int(method == "attnpredict"),
         )
         return plan.budget(num_slots)
     if method != "quest":

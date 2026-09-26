@@ -1791,6 +1791,8 @@ def parse_args():
     parser.add_argument("--model-path", type=str, required=True, help="Model path or HF name")
     parser.add_argument("--sparse-method", type=str, default="vanilla",
                         help="Sparse method name; fixed-batch vLLM accepts vanilla or explicitly configured snapkv.")
+    parser.add_argument("--method-configs", default=None,
+                        help="JSON or @file mapping comma-separated method labels to sparse_method/hyper_params; continuous decode only, Markdown output.")
     parser.add_argument("--prompt-lens", type=_parse_ints, default=[8192, 16384, 32768])
     parser.add_argument("--output-lens", type=_parse_ints, default=[128])
     parser.add_argument("--batch-sizes", type=_parse_ints, default=[1])
@@ -1881,6 +1883,10 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.method_configs:
+        from benchmark.efficiency.paper import run_method_variants
+        run_method_variants(args, _parse_json_arg(args.method_configs))
+        return
     if args.decode_only_steps:
         if args.engine == "sparsevllm" and int(
             _parse_json_arg(args.hyper_params).get("data_parallel_size", 1)
@@ -1897,7 +1903,7 @@ def main():
         raise ValueError("Fork-specific --engine-kwargs currently require --scenario fixed")
     if args.backend_label and (args.engine != "vllm" or args.scenario != "fixed"):
         raise ValueError("--backend-label requires fixed-batch vLLM")
-    if args.decode_only_steps < 0 or args.decode_only_warmup_steps < 1:
+    if args.decode_only_steps < 0 or args.decode_only_warmup_steps < 0:
         raise ValueError("Invalid decode-only window length or warmup")
     if args.prefill_wave_size < 0 or (
         args.prefill_wave_size

@@ -325,6 +325,8 @@ class LLMEngine:
         self.model_runner.call("arm_runtime_compilation_guard")
         if os.getenv("SPARSEVLLM_PROFILER_RESET_AFTER_WARMUP", "0") == "1":
             profiler.reset()
+        if os.getenv("SPARSEVLLM_PROFILE_RUNTIME", "0") == "1":
+            torch.cuda.profiler.start()
         self._throughput_logger.start()
 
     @staticmethod
@@ -593,6 +595,7 @@ class LLMEngine:
         return prompt_offset
 
     def _warmup(self):
+        warmup_started = perf_counter()
         logger.info("Startup profiling begins with a temporary KV runtime.")
         prompt_offset = 0
         compile_prompt_len = min(
@@ -600,11 +603,13 @@ class LLMEngine:
             int(self.config.engine_prefill_chunk_size),
             int(self.config.max_model_len) - 1,
         )
+        logger.info("Startup initial kernel warmup: prompt_tokens={} (cache misses compile here).", compile_prompt_len)
         prompt_offset = self._run_startup_batch(
             (compile_prompt_len,),
             SamplingParams(max_tokens=1, temperature=0.0),
             prompt_offset,
         )
+        logger.info("Startup initial kernel warmup complete: {:.2f}s.", perf_counter() - warmup_started)
         self._after_warmup_debug_cleanup()
         self._warmup_moe_workspaces()
         self._after_warmup_debug_cleanup()
@@ -673,7 +678,7 @@ class LLMEngine:
         final_records = self.model_runner.call("capture_startup_memory_snapshot")
         log_startup_completion(production_records, final_records, decision)
         self.model_runner.call("log_operator_implementations")
-        logger.info("Startup completed; production runtime is ready.")
+        logger.info("Startup completed in {:.2f}s; production runtime is ready.", perf_counter() - warmup_started)
 
     def _warmup_moe_workspaces(self) -> None:
         token_counts = _moe_workspace_warmup_token_counts(self.config)

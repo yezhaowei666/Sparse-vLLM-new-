@@ -193,6 +193,7 @@ def build_mha_decode_attention_spec(
     requires_decode_scores = sparse_decode_attention_requires_scores(
         normalized_method,
         h2o_decode_eviction=getattr(runtime_config, "h2o_decode_eviction", False),
+        leasesparse_predictor_path=getattr(runtime_config, "leasesparse_predictor_path", ""),
     )
     return DecodeAttentionOpSpec(
         kv_storage_format=cache_method if cache_method in QUANTIZED_KV_METHODS else "dense",

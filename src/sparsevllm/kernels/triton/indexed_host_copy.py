@@ -133,7 +133,7 @@ def _gather_cached(
         tl.store(CACHE + position * WIDTH + offsets % WIDTH, value, valid)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["CAPACITY"])
 def _gather_prefill(
     SRC_PTR,
     CURRENT,
@@ -146,7 +146,7 @@ def _gather_prefill(
     TABLE_STRIDE: tl.constexpr,
     CURRENT_STRIDE: tl.constexpr,
     WIDTH: tl.constexpr,
-    CAPACITY: tl.constexpr,
+    CAPACITY,
     COMPONENT: tl.constexpr,
     BLOCK: tl.constexpr,
 ):

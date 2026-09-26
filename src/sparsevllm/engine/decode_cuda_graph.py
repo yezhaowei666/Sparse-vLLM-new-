@@ -255,10 +255,10 @@ class DecodeCudaGraphRunner:
             ],
         }
 
-    def _graph_path_id(self) -> str:
+    def _graph_path_id(self, seqs: list[Sequence]) -> str:
         resolver = getattr(self.cache_manager, "decode_graph_path_id", None)
         if callable(resolver):
-            return str(resolver())
+            return str(resolver(seqs))
         return decode_graph_path_id(self.method)
 
     def _graph_path_capacity(
@@ -353,7 +353,7 @@ class DecodeCudaGraphRunner:
             self.sparse_controller.prepare_forward(seqs, is_prefill=False)
             participant = graph_state.runtime_state
             if participant is not None:
-                participant.prepare_in_graph()
+                participant.prepare_in_graph(warmup=True)
             logits = self.run_model(input_ids, positions, is_prefill=False)
             if state.key.capture_sampling:
                 if logits is None:
@@ -428,6 +428,7 @@ class DecodeCudaGraphRunner:
         *,
         capture_sampling: bool = False,
         replay_after_capture: bool = True,
+        graph_path_id: str | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         if not seqs:
             raise ValueError("decode_graph requires a non-empty decode batch.")
@@ -449,7 +450,7 @@ class DecodeCudaGraphRunner:
             return self.run_eager_static(seqs), None
 
         graph_batch_size = self.dp_batch_capacity or self._select_graph_batch_size(real_batch_size)
-        graph_path_id = self._graph_path_id()
+        graph_path_id = graph_path_id or self._graph_path_id(seqs)
         context_capacity = self._graph_path_capacity(seqs)
         state = self._select_state(
             method=self.method,
@@ -500,7 +501,7 @@ class DecodeCudaGraphRunner:
 
         real_batch_size = len(seqs)
         graph_batch_size = self.dp_batch_capacity or self._select_graph_batch_size(real_batch_size)
-        graph_path_id = self._graph_path_id()
+        graph_path_id = self._graph_path_id(seqs)
         context_capacity = self._graph_path_capacity(seqs)
         state = self._select_state(
             method=self.method,

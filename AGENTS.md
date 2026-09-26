@@ -24,6 +24,13 @@ This repository includes repo-local Codex skills.
 
 # Task Running Rules
 
+## 用户指定的实验归档规则（2026-09-18起）
+
+- 用户要求之后每类实验完成后，归档到本仓库 `yzw-资料/experiment/`（当前绝对路径 `/root/autodl-tmp/sparsevllm-new/yzw-资料/experiment/`）。此要求取代此前“除非明确要求否则不保存结果”的偏好。
+- 按实验类别建立简短的 `YYYYMMDD_实验名称` 子目录；当天同类配置、对照、重复和失败尝试合并记录，不为每个测试点新建文档。
+- 子目录默认只保留一份 Markdown 记录，至少包含实验目的、配置、命令、结果；同时说明实际生效配置、失败原因、证据来源和比较限制，不把未验证推测写成结论。
+- 用户指定的归档位置及简洁要求优先于技能默认归档规则。
+
 1. Before running a task, check whether each device is idle. Select an idle device when one is available. If all devices are busy, wait first; if the wait becomes too long, report the situation instead of starting the task on a busy device. Ignore the above requirements when the user indicates that the GPU can be shared with other processes.
 2. Do not hardcode private paths (including local machine paths and remote paths) in test scripts; pass them via variables or arguments instead. Scripts located under `scripts/tmp/` are exempt from this restriction.
 3. When using a conda environment, activate it or use `conda run`; invoking only its absolute `python` path does not expose environment-provided executables such as `ninja` to child processes.
@@ -205,3 +212,14 @@ run without a GPU.
 # Docs Rules
 
 Keep official documentation focused on stable user-visible behavior and operational constraints; place internal implementation details, provider/kernel selection rationale, benchmark methodology and results, and transient engineering plans in development documentation unless users need them to use or troubleshoot the feature.
+
+## 单位、回答与代码的硬性约束（用户于2026-09-18指定）
+- Token 长度按十进制：1K = 1000 token，128K = 128000 token；命令、实验配置和报告统一遵守。
+- 存储容量按1024进制：1 KB = 1024字节，1 MB = 1024 KB，1 GB = 1024 MB。使用MB、GB等单位，优先GB，不使用带i的单位，不额外备注单位口径。
+- 历史实验保留实际测量的token数量和原始数据，不因单位约定改变而改写实验事实。
+- 回答用最少的话完整说清楚，删除冗余备注、防御性说明和重复提醒。
+- 代码用最少的实现完整满足需求，不添加兜底逻辑、防御性编程、无关抽象或未要求的兼容分支；错误直接暴露，不静默掩盖。
+
+## 实验证据保存规则（用户于2026-09-19指定）
+
+- 实验目录只保存 Markdown 记录，不再保存证据压缩包、原始结果包、日志、张量、性能分析报告或源码快照等额外证据文件；只有用户明确要求时才保存。此规则优先于此前要求保留额外证据的归档约定。

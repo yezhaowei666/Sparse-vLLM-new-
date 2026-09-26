@@ -162,6 +162,7 @@ class CacheDecodeGraphState:
 
     contract: DecodeGraphContract
     inputs: DecodeGraphInputs
+    capture_warmup: bool = field(default=False, kw_only=True)
 
 
 @dataclass
@@ -194,6 +195,6 @@ class DecodeGraphParticipant(Protocol):
 
     def prepare_out_graph(self, seqs: list[object]) -> None: ...
 
-    def prepare_in_graph(self) -> None: ...
+    def prepare_in_graph(self, *, warmup: bool = False) -> None: ...
 
     def graph_keepalive_tensors(self) -> Iterable[torch.Tensor]: ...

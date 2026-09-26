@@ -44,7 +44,7 @@ def test_decode_graph_runner_blocks_replay_until_collectives_are_ready() -> None
     runner.dp_batch_capacity = None
     runner.method = ""
     runner._select_graph_batch_size = lambda batch_size: batch_size
-    runner._graph_path_id = lambda: ""
+    runner._graph_path_id = lambda seqs: ""
     runner._graph_path_capacity = lambda seqs: 128
     runner._select_state = lambda **kwargs: state
     runner._prepare_static_step = lambda state, seqs: (None, None)
@@ -159,7 +159,7 @@ def test_typed_decode_graph_participant_delegates_to_cache_owner() -> None:
             state.inputs.input_ids.fill_(7)
 
         def prepare_decode_graph_in(self, state):
-            calls.append(("prepare_in", state.contract.topology_path_id))
+            calls.append(("prepare_in", state.contract.topology_path_id, state.capture_warmup))
 
         def decode_graph_state_keepalive_tensors(self, state):
             calls.append(("keepalive", state.contract.topology_path_id))
@@ -205,6 +205,7 @@ def test_typed_decode_graph_participant_delegates_to_cache_owner() -> None:
 
     participant = runtime.init_decode_graph_state(graph_state)
     runtime.prepare_decode_graph_step([object()], graph_state)
+    participant.prepare_in_graph(warmup=True)
     participant.prepare_in_graph()
     keepalive = graph_state.keepalive_tensors()
 
@@ -217,7 +218,9 @@ def test_typed_decode_graph_participant_delegates_to_cache_owner() -> None:
         ("operator_init", 2),
         ("prepare_out", 1),
         ("operator_out", 32),
-        ("prepare_in", "dense"),
+        ("prepare_in", "dense", True),
+        ("operator_in", "dense"),
+        ("prepare_in", "dense", False),
         ("operator_in", "dense"),
         ("keepalive", "dense"),
         ("operator_keepalive", "dense"),

@@ -1982,11 +1982,13 @@ class ModelRunner:
         try:
             if self.parallel_context.attn_dp_size > 1:
                 self.decode_graph_runner.dp_batch_capacity = None
-            self.decode_graph_runner.run(
-                seqs,
-                capture_sampling=False,
-                replay_after_capture=False,
-            )
+            for path in self.cache_manager.decode_graph_capture_paths(seqs):
+                self.decode_graph_runner.run(
+                    seqs,
+                    capture_sampling=False,
+                    replay_after_capture=False,
+                    graph_path_id=path,
+                )
             if self.parallel_context.attn_dp_size > 1:
                 capacity = self.decode_graph_runner.last_state_key.batch_size
                 self.capture_dp_idle_graph(capacity)

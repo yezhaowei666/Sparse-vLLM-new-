@@ -285,3 +285,44 @@ def test_reuse_adapter_preserves_tp_wave_window_and_failure(monkeypatch, tmp_pat
         assert result["decode_stage_throughput_tps"] == 2
         with pytest.raises(FileExistsError):
             run_paper_decode(args)
+
+
+def test_method_variants_isolate_lease_configs_and_remove_temporary_results(tmp_path, monkeypatch):
+    """EMA and predictor share a method name but must not share checkpoint settings."""
+    from benchmark.efficiency import paper
+    seen = []
+    monkeypatch.setattr(paper.subprocess, 'check_output', lambda *a, **kw: '')
+    def run(args):
+        seen.append((json.loads(args.hyper_params), Path(args.output_dir)))
+        Path(args.output_dir, 'performance.jsonl').write_text(json.dumps(dict(
+            status='success', decode_stage_throughput_tps=1., peak_memory_gb=2., repetitions=[]))+'\n')
+    monkeypatch.setattr(paper, 'run_paper_decode', run)
+    args = NS(decode_only_steps=126, monitor_gpus='0', sparse_method='predictor,ema',
+              hyper_params='{"leasesparse_reuse_steps":4}', output_dir=str(tmp_path))
+    paper.run_method_variants(args, {
+        'predictor':dict(sparse_method='leasesparse', hyper_params={'leasesparse_predictor_path':'checkpoint'}),
+        'ema':dict(sparse_method='leasesparse', hyper_params={})})
+    assert seen[0][0]['leasesparse_predictor_path']=='checkpoint'
+    assert 'leasesparse_predictor_path' not in seen[1][0]
+    assert not any(path.exists() for _,path in seen)
+    assert [p.name for p in tmp_path.iterdir()]==['记录.md']
+
+
+def test_method_variant_failure_remains_failure_after_later_success(tmp_path, monkeypatch):
+    """A failed engine must not disappear behind the final method's success."""
+    from benchmark.efficiency import paper
+    monkeypatch.setattr(paper.subprocess, 'check_output', lambda *a, **kw: '')
+    seen=[]
+    def run(args):
+        seen.append(args.sparse_method)
+        if args.sparse_method=='bad':
+            Path(args.output_dir,'failure.log').write_text('worker detail')
+            raise RuntimeError('worker failed')
+        Path(args.output_dir,'performance.jsonl').write_text(json.dumps(dict(
+            status='success', decode_stage_throughput_tps=1., peak_memory_gb=2.))+'\n')
+    monkeypatch.setattr(paper,'run_paper_decode',run)
+    args=NS(decode_only_steps=126,monitor_gpus='0',sparse_method='bad,good',hyper_params='{}',output_dir=str(tmp_path))
+    with pytest.raises(RuntimeError,match='Failed method variants'):
+        paper.run_method_variants(args,{x:dict(sparse_method=x,hyper_params={}) for x in ('bad','good')})
+    assert seen==['bad','good']
+    assert 'worker detail' in (tmp_path/'记录.md').read_text()

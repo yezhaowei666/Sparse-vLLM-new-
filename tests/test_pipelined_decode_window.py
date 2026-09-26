@@ -161,3 +161,31 @@ def test_hisparse_overlap_queue_processes_each_result_once(monkeypatch, tmp_path
     measured_window_process(Scheduler, run)
     assert processed == list(range(1, 10))
     assert syncs == [3, 6]
+
+
+def test_zero_warmup_excludes_prefill_and_counts_first_decode():
+    now, syncs = [0.0], []
+    graph = dict(capture_count=0, replay_count=0, eager_decode_count=0)
+    window = PipelinedDecodeWindow(2, 2, 0, synchronize=lambda: syncs.append(now[0]),
+                                  clock=lambda: now[0], graph_stats=lambda: dict(graph))
+    window.boundary()
+    ticket = window.submit(is_decode=False, request_ids=[], tokens=8,
+                           admission_complete=False, context_lengths=[])
+    window.complete(ticket)
+    now[0] = 100
+    window.boundary(ready_request_ids=[1])
+    assert window.started is None
+    window.boundary(ready_request_ids=[2, 1])
+    for context in (10, 11):
+        ticket = window.submit(is_decode=True, request_ids=[1, 2], tokens=2,
+                               admission_complete=True, context_lengths=[context, context])
+        now[0] += 2
+        graph['replay_count'] += 1
+        window.complete(ticket, decode_tokens=2)
+    window.boundary()
+    result = window.require_result()
+    assert syncs == [100, 104]
+    assert result['discarded_full_decode_steps'] == 0
+    assert result['decode_stage_tokens'] == 4
+    assert result['decode_stage_elapsed_s'] == 4
+    assert result['context_lengths_start'] == [10, 10]

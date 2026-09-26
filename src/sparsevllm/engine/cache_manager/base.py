@@ -490,6 +490,13 @@ class CacheManager(ABC):
             from .methods.quest import QuestCacheManager
 
             return create_manager(QuestCacheManager)
+        if sparse_method == "attnpredict":
+            from .methods.attnpredict import AttnPredictCacheManager
+            return AttnPredictCacheManager(config, parallel_context, allocation_budget_bytes=allocation_budget_bytes)
+        if sparse_method == "leasesparse":
+            from .methods.leasesparse import LeaseSparseCacheManager
+
+            return create_manager(LeaseSparseCacheManager)
         if sparse_method == "omnikv":
             from .methods.omnikv.manager import OmniKVCacheManager
 
@@ -1261,8 +1268,11 @@ class CacheManager(ABC):
         del real_batch_size, capture_sizes
         return None
 
-    def decode_graph_path_id(self) -> str:
+    def decode_graph_path_id(self, seqs: list[Sequence] = ()) -> str:
         return decode_graph_path_id(str(getattr(self.config, "sparse_method", "") or ""))
+
+    def decode_graph_capture_paths(self, seqs: list[Sequence]) -> tuple[str, ...]:
+        return (self.decode_graph_path_id(seqs),)
 
     def decode_graph_path_capacity(self) -> int:
         return int(self.config.max_model_len)

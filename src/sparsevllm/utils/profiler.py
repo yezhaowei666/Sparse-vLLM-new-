@@ -16,6 +16,7 @@ class Profiler:
         self.times = defaultdict(float)
         self.counts = defaultdict(int)
         self.enabled = False
+        self.nvtx = os.environ.get("SPARSEVLLM_NVTX", "0") == "1"
         self.rank = 0
         # 通过环境变量开启设备同步，以准确测量设备耗时；保留旧 CUDA 名称兼容。
         self.device_sync = (
@@ -31,6 +32,10 @@ class Profiler:
 
     @contextmanager
     def record(self, name):
+        if self.nvtx:
+            with torch.cuda.nvtx.range(name):
+                yield
+            return
         if not self.enabled:
             yield
             return

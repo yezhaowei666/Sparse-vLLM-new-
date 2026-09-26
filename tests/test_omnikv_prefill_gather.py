@@ -6,6 +6,7 @@ import torch
 from sparsevllm.operators.indexed_host_copy import (
     gather_prefill_rows, gather_prefill_history, scatter_prefill_current,
 )
+from sparsevllm.utils.compilation_guard import RuntimeCompilationGuard
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -92,4 +93,15 @@ def test_full_prefill_view_uses_gpu_current_chunk(
                 pointers, current, destination, table, rows, lengths, cu_query, slot_map,
                 capacity=capacity, component=component,
             )
+            # A changed host launch bound must reuse the compiled kernel;
+            # padded columns are still masked by each request's true length.
+            guard = RuntimeCompilationGuard(0, rank=0)
+            guard.arm()
+            try:
+                gather_prefill_rows(
+                    pointers, current, destination, table, rows, lengths, cu_query, slot_map,
+                    capacity=capacity + 1, component=component,
+                )
+            finally:
+                guard.close()
         torch.testing.assert_close(destination.cpu(), expected, rtol=0, atol=0)

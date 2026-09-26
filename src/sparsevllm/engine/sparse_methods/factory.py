@@ -9,6 +9,8 @@ from sparsevllm.method_registry import (
 
 from .base import SparseMethodRuntime
 from .dynamic import DeltaKVRuntime, OmniKVRuntime
+from .leasesparse import LeaseSparseRuntime
+from .attnpredict import AttnPredictRuntime
 from .h2o import H2ORuntime
 from .joint import RKVRuntime, SkipKVRuntime
 from .passthrough import PassThroughRuntime
@@ -26,6 +28,8 @@ RUNTIME_BINDINGS: dict[str, type[SparseMethodRuntime]] = {
     "h2o": H2ORuntime,
     "pyramidkv": PyramidKVRuntime,
     "omnikv": OmniKVRuntime,
+    "leasesparse": LeaseSparseRuntime,
+    "attnpredict": AttnPredictRuntime,
     "quest": PassThroughRuntime,
     "rkv": RKVRuntime,
     "skipkv": SkipKVRuntime,

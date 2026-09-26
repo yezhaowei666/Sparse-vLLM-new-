@@ -123,6 +123,9 @@ class OmniKVRuntime(DynamicSelectionRuntime):
         if event.forward_context.is_prefill or event.layer_idx not in self.obs_layer_ids:
             return
         with self.cache_manager.selection_stream():
+            if self.reuse_steps > 1:
+                state = self.layer_batch_sparse_states[event.layer_idx]
+                self.cache_manager.prepare_selection_reuse(event.layer_idx, state.req_indices, state.context_lens)
             super().on_layer_end(LayerEndEvent(
                 layer_idx=event.layer_idx,
                 layer_context=event.forward_context,
@@ -142,6 +145,9 @@ class OmniKVRuntime(DynamicSelectionRuntime):
 
     def __init__(self, config, cache_manager):
         super().__init__(config, cache_manager)
+        self.reuse_steps = getattr(config, "omnikv_reuse_steps", 1)
+        if self.reuse_steps > 1:
+            cache_manager.initialize_selection_reuse()
         from sparsevllm.operators.omnikv_score import OmniKVScoreSpec, prepare_omnikv_score_provider
 
         dtype = config.hf_config.dtype
@@ -333,7 +339,8 @@ class OmniKVRuntime(DynamicSelectionRuntime):
         state: LayerBatchSparseState,
     ) -> torch.Tensor:
         return self._omnikv_score_provider.run(
-            state.attn_score, state.context_lens, slot=id(state),
+            state.attn_score, (self.cache_manager.reuse_score_lengths if self.reuse_steps > 1
+                               else state.context_lens), slot=id(state),
             selection_keep=int(self.decode_keep_tokens),
         )
 
@@ -389,7 +396,8 @@ class OmniKVRuntime(DynamicSelectionRuntime):
                     )
                 else:
                     topk_indices = self._omnikv_selection_provider.select(
-                        token_scores, rel_hist_lens.clamp(max=candidate_capacity).to(torch.int32), k_max,
+                        token_scores, (torch.where(self.cache_manager.reuse_refresh, rel_hist_lens, 0)
+                                       if self.reuse_steps > 1 else rel_hist_lens).clamp(max=candidate_capacity).to(torch.int32), k_max,
                     )
             else:
                 topk_lens = torch.zeros(
@@ -401,6 +409,11 @@ class OmniKVRuntime(DynamicSelectionRuntime):
                     (batch_size, 0),
                     device=self.device,
                     dtype=torch.int32,
+                )
+
+            if self.reuse_steps > 1 and not context.is_prefill:
+                topk_indices = self.cache_manager.commit_selection_reuse(
+                    obs_layer_idx, obs_state.req_indices, obs_state.context_lens, topk_indices,
                 )
 
             if context.is_prefill:

@@ -65,6 +65,8 @@ Additional entrypoints:
   vanilla/SnapKV and vLLM vanilla with default TP2. Requires `nsys` and
   performance-counter permissions; produces `timeline.nsys-rep`.
 
+Native Sparse-vLLM accepts `--num-warmups 0 --decode-only-warmup-steps 0` to retain only engine startup warmup and time the first full-batch decode step. With 128 output tokens, 127 decode steps are available. Compare this protocol separately from runs with extra warmup.
+
 <a id="measurement-contract"></a>
 
 ## Metrics and Timing Contract
@@ -224,3 +226,7 @@ and Research-Vault records. Do not store the experiment in tmp or overwrite old 
 | Output collision | Choose a new directory, preserving historical runs |
 | Window/Graph/async validation fails | Keep logs and diagnose the adapter; do not substitute another synchronization protocol |
 | Hardware sampling or Nsight permissions fail | Check sample JSON, tools, and permissions; coarse activity is not a replacement for counters |
+
+### Named configurations in one continuous-decode command
+
+Pass comma-separated labels through `--sparse-method` and a JSON mapping through `--method-configs @<CONFIG.json>`. Each label maps to `sparse_method` and `hyper_params`; configuration values accept environment variables. This mode requires `--monitor-gpus`, checks GPU idleness before each sequential method, and keeps only `记录.md` under the output directory. Temporary raw artifacts are removed after validation, and existing records are never overwritten.

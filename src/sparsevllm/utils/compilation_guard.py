@@ -61,15 +61,18 @@ class RuntimeCompilationGuard(importlib.abc.MetaPathFinder):
             count = self.count
         detail = (
             f"Runtime kernel compilation rank={self.rank} count={count} "
-            f"limit={self.limit} backend={backend} kernel={kernel}\n"
-            + "".join(traceback.format_stack(limit=16)[:-1])
+            f"limit={self.limit} backend={backend} kernel={kernel}"
         )
         if count > self.limit:
             raise RuntimeCompilationError(
-                detail + "Compilation blocked before code generation. "
+                detail + "\n" + "".join(traceback.format_stack(limit=16)[:-1])
+                + "Compilation blocked before code generation. "
                 "Warm up this specialization or remove unintended specialization."
             )
-        logger.warning("{}", detail)
+        if count == 1:
+            logger.warning("{}; further compilations logged at DEBUG level.", detail)
+        else:
+            logger.debug("{}", detail)
 
     def _patch(self, owner, name, replacement):
         previous = getattr(owner, name)  # Unsupported upstream APIs fail explicitly.
@@ -149,6 +152,8 @@ class RuntimeCompilationGuard(importlib.abc.MetaPathFinder):
         logger.info("Runtime compilation guard armed: rank={} limit={}", self.rank, self.limit)
 
     def close(self):
+        if self._armed:
+            logger.info("Runtime compilations: rank={} count={} limit={}", self.rank, self.count, self.limit)
         if self in sys.meta_path:
             sys.meta_path.remove(self)
         for owner, name, previous, replacement in reversed(self._patches):

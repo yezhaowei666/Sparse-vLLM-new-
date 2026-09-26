@@ -18,5 +18,7 @@ wandb/
 /dev_docs/
 docs/dev-notes/
 /scratch
+# Private research materials stay local.
+/yzw-资料/
 # Measurements live outside the source checkout; ignore local compatibility links too.
 /scripts/official_experiments/sparse_decode_efficiency/data
